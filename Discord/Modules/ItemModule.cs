@@ -41,7 +41,22 @@ namespace SysBot.ACNHOrders
             await PrintItemsAsync(itemName, strings).ConfigureAwait(false);
         }
 
-        private async Task PrintItemsAsync(string itemName, IReadOnlyList<ComboItem> strings)
+        [Command("lookupPage")]
+        [Alias("lp", "searchPage")]
+        [Summary("Gets a list of items with page that contain the request string.")]
+        [RequireQueueRole(nameof(Globals.Bot.Config.RoleUseBot))]
+        public async Task SearchItemsAsync([Summary("Page number")] int page, [Summary("Item name / item substring")][Remainder] string itemName)
+        {
+            if (!Globals.Bot.Config.AllowLookup)
+            {
+                await ReplyAsync($"{Context.User.Mention} - Lookup commands are not accepted.");
+                return;
+            }
+            var strings = GameInfo.Strings.ItemDataSource;
+            await PrintItemsAsync(itemName, strings, page).ConfigureAwait(false);
+        }
+
+        private async Task PrintItemsAsync(string itemName, IReadOnlyList<ComboItem> strings, int page = 1)
         {
             const int minLength = 2;
             if (itemName.Length <= minLength)
@@ -50,28 +65,49 @@ namespace SysBot.ACNHOrders
                 return;
             }
 
-            var exact = ItemParser.GetItem(itemName, strings);
-            if (!exact.IsNone)
+            if (page < 1)
             {
-                var msg = $"{exact.ItemId:X4} {itemName}";
-                await ReplyAsync(Format.Code(msg)).ConfigureAwait(false);
+                await ReplyAsync($"Invalid page number {page}.").ConfigureAwait(false);
                 return;
             }
 
             var matches = ItemParser.GetItemsMatching(itemName, strings).ToArray();
-            var result = string.Join(Environment.NewLine, matches.Select(z => $"{z.Value:X4} {z.Text}"));
 
-            if (result.Length == 0)
+            const int maxLength = 1500;
+            const int maxLines = 15;
+
+            var totalPages = (matches.Length + maxLines - 1) / maxLines;
+
+            var ordered = matches
+                .OrderBy(z => LevenshteinDistance.Compute(z.Text, itemName))
+                .Skip(maxLines * (page - 1))
+                .Take(maxLines);
+
+            if (ordered.Count() == 0)
             {
                 await ReplyAsync("No matches found.").ConfigureAwait(false);
                 return;
             }
 
-            const int maxLength = 500;
+            var selected = ordered.Select(z => {
+                var msg = $"{z.Value:X4} {z.Text}";
+                if (ItemParser.InvertedRecipeDictionary.TryGetValue((ushort)z.Value, out var recipeID))
+                {
+                    msg += $", DIY: {recipeID:X}000016A2";
+                }
+                return msg;
+            });
+            
+            var result = string.Join(Environment.NewLine, selected);
+            var pageIndicator = $"Page {page}/{totalPages}";
+
+            if (totalPages > 1)
+            {
+                result += $"\n{(page != totalPages ? "..." : "")}[{pageIndicator}]";
+            }
+
             if (result.Length > maxLength)
             {
-                var ordered = matches.OrderBy(z => LevenshteinDistance.Compute(z.Text, itemName));
-                result = string.Join(Environment.NewLine, ordered.Select(z => $"{z.Value:X4} {z.Text}"));
                 result = result.Substring(0, maxLength) + "...[truncated]";
             }
 
@@ -102,6 +138,42 @@ namespace SysBot.ACNHOrders
                 await ReplyAsync($"No customization data available for the requested item ({name}).").ConfigureAwait(false);
             else
                 await ReplyAsync($"{name}:\r\n{result}").ConfigureAwait(false);
+        }
+
+        [Command("stack")]
+        [Summary("Stacks an item to max and prints the hex code.")]
+        [RequireQueueRole(nameof(Globals.Bot.Config.RoleUseBot))]
+        public async Task StackAsync([Summary("Item ID (in hex)")] string itemHex)
+        {
+            if (!Globals.Bot.Config.AllowLookup)
+            {
+                await ReplyAsync($"{Context.User.Mention} - Lookup commands are not accepted.");
+                return;
+            }
+
+            ushort itemID = ItemParser.GetID(itemHex);
+            bool canStack = ItemInfo.TryGetMaxStackCount(itemID, out ushort maxStack);
+            if (itemID == Item.NONE)
+            {
+                await ReplyAsync("Invalid item requested.").ConfigureAwait(false);
+                return;
+            }
+
+            if (!canStack)
+            {
+                await ReplyAsync("Cannot stack.").ConfigureAwait(false);
+                return;
+            }
+
+            var ct = (ushort)(maxStack - 1);
+            var item = new Item(itemID) { Count = ct };
+            var msg = ItemParser.GetItemText(item);
+            
+            if (maxStack > 1)
+            {
+                msg += $" (Max: {maxStack})";
+            }
+            await ReplyAsync(msg).ConfigureAwait(false);
         }
 
         [Command("stack")]
